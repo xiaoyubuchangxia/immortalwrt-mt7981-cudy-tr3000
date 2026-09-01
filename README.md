@@ -118,7 +118,23 @@ luci-app-aurora-config
 
 ---
 
-### 4. 默认系统设置
+### 4. 后装插件公共依赖基线
+
+256M 与 512M 固件共同选择本地 `onecat-plugin-base` meta-package，预置后装 LuCI 插件最常复用、刷机后最难补齐的公共能力：
+
+```text
+HTTPS / CA：curl、wget-ssl、CA 证书
+脚本与文本：bash、jq、GNU grep/sed/find/xargs、常用 coreutils
+压缩归档：unzip、tar、gzip、bzip2、xz、zstd
+网络诊断与流控：ip-full、tc、ss、tcpdump、ethtool
+内核兼容：TUN、IFB、CAKE、socket diag、TProxy、WireGuard
+```
+
+这只是兼容基线，不会预装具体代理、存储、容器或业务 LuCI 应用，也不会加入 Python / Node 等大型运行时。
+
+---
+
+### 5. 默认系统设置
 
 默认主机名：
 
