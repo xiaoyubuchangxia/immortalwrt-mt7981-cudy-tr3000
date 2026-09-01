@@ -7,7 +7,7 @@
 # Cudy TR3000 ImmortalWrt Auto Build 🐱
 
 > 给 Cudy TR3000 准备的一套 ImmortalWrt 自动编译仓库。
-> 小猫崽出品，主打一个：能编、能刷、别乱刷。😼
+> OneCat定制版本，主打一个：能编、能刷、别乱刷。😼
 
 ---
 
@@ -123,7 +123,13 @@ luci-app-aurora-config
 默认主机名：
 
 ```text
-CudyX
+OneCat
+```
+
+定制标识：
+
+```text
+OneCat定制版本
 ```
 
 默认 LAN IP：
@@ -196,9 +202,8 @@ feeds 更新后执行。
 
 ```text
 512M DTS 注入
-默认主机名
-默认 LAN IP
-小猫崽角标
+默认主机名与 OneCat定制版本标识
+单一 LuCI 定制角标
 4G / 5G 驱动配置补充
 ```
 

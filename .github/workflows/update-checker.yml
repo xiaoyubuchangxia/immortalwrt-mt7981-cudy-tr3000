@@ -12,6 +12,10 @@
 
 name: Update Checker
 
+permissions:
+  actions: write
+  contents: write
+
 env:
   REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-6.6
   REPO_BRANCH: openwrt-24.10-6.6
@@ -19,40 +23,49 @@ env:
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 0 1 * *
+    # GitHub removes caches that are not accessed for more than 7 days.
+    # A daily check keeps the source SHA cache alive and only dispatches on a real SHA change.
+    - cron: '17 3 * * *'
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get Commit Hash
-        id: getHash
+      - name: Get Source Commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
-          echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          REPO_SLUG="${REPO_URL#https://github.com/}"
+          REPO_SLUG="${REPO_SLUG%.git}"
+          COMMIT_HASH="$(gh api "repos/${REPO_SLUG}/commits/${REPO_BRANCH}" --jq .sha)"
+          echo "commit=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
 
-      - name: Compare Commit Hash
-        id: cacheHash
-        uses: actions/cache@v3
+      - name: Restore Source Commit Cache
+        id: source-cache
+        uses: actions/cache@v4
         with:
-          path: .commitHash
-          key: commitHash_${{ steps.getHash.outputs.commitHash }}
+          path: .source-commit
+          key: source-${{ env.REPO_BRANCH }}-${{ steps.source.outputs.commit }}
 
-      - name: Save New Commit Hash
-        if: steps.cacheHash.outputs.cache-hit != 'true'
-        run: |
-          echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash
+      - name: Record Source Commit
+        if: steps.source-cache.outputs.cache-hit != 'true'
+        run: printf '%s\n' '${{ steps.source.outputs.commit }}' > .source-commit
 
-      - name: Trigger build
-        if: steps.cacheHash.outputs.cache-hit != 'true'
-        uses: peter-evans/repository-dispatch@v2
+      - name: Trigger Firmware Build
+        if: steps.source-cache.outputs.cache-hit != 'true'
+        uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ github.token }}
           event-type: Source Code Update
-          client-payload: '{"device": "all", "repo": "https://github.com/padavanonly/immortalwrt-mt798x-6.6"}'
+          client-payload: >-
+            {"device":"all","repo":"${{ env.REPO_URL }}","commit":"${{ steps.source.outputs.commit }}","release":"true","prerelease":"false"}
 
       - name: Delete workflow runs
+        if: always()
+        continue-on-error: true
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 0

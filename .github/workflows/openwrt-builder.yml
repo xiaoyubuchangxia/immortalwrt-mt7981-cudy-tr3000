@@ -1,11 +1,16 @@
 name: ImmortalWrt Builder
 
 permissions:
+  actions: write
   contents: write
+
+concurrency:
+  group: immortalwrt-builder
+  cancel-in-progress: false
 
 on:
   repository_dispatch:
-    types: [ "Source Code Update" ]
+    types: ["Source Code Update"]
   workflow_dispatch:
     inputs:
       device:
@@ -15,22 +20,20 @@ on:
         default: 'all'
         options:
           - '256M'
-          - '128M'
-          - '128M-Ubootmod'
           - '512M'
-          - 'all' 
+          - 'all'
       repo:
         description: '指定源码仓库地址'
         required: true
         type: string
         default: 'https://github.com/padavanonly/immortalwrt-mt798x-6.6'
       commit:
-        description: '指定源码commit进行编译，留空拉取最新源码'
+        description: '指定源码 commit（必须包含 2026-07-08 MTK 扫描修复），留空拉取最新源码'
         required: false
         type: string
         default: ''
       ssh:
-        description: '是否执行 make menuconfig, 编译设备为 all 时无效'
+        description: '是否执行 make menuconfig，编译设备为 all 时无效'
         required: false
         type: boolean
         default: false
@@ -46,105 +49,181 @@ on:
         default: false
 
 env:
-  DEVICE_INPUT: ${{ github.event.inputs.device || github.event.client_payload.device }}
+  DEVICE_INPUT: ${{ github.event.inputs.device || github.event.client_payload.device || 'all' }}
+  REPO_URL: ${{ github.event.inputs.repo || github.event.client_payload.repo || 'https://github.com/padavanonly/immortalwrt-mt798x-6.6' }}
+  REPO_BRANCH: openwrt-24.10-6.6
+  REPO_COMMIT: ${{ github.event.inputs.commit || github.event.client_payload.commit || '' }}
+  UPLOAD_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || 'false' }}
+  PRERELEASE: ${{ github.event.inputs.prerelease || github.event.client_payload.prerelease || 'false' }}
   CCACHE_DIR: /workdir/.ccache
   CCACHE_MAXSIZE: 2G
-  REPO_URL: ${{ github.event.inputs.repo || github.event.client_payload.repo }}
-  REPO_BRANCH: openwrt-24.10-6.6
-  REPO_COMMIT: ${{ github.event.inputs.commit }}
   FEEDS_CONF: feeds.conf.default
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_RELEASE: ${{ github.event.inputs.release }}
-  PRERELEASE: ${{ github.event.inputs.prerelease }}
   TZ: Asia/Shanghai
 
 jobs:
+  prepare:
+    name: 🧭 Prepare Build Matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      device: ${{ steps.plan.outputs.device }}
+      release: ${{ steps.plan.outputs.release }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      source_commit: ${{ steps.plan.outputs.source_commit }}
+    steps:
+      - name: 🔎 Resolve Build Plan
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$DEVICE_INPUT" in
+            256M)
+              MATRIX='{"include":[{"device":"256M","config":"config/256m.config"}]}'
+              ;;
+            512M)
+              MATRIX='{"include":[{"device":"512M","config":"config/512m.config"}]}'
+              ;;
+            all)
+              MATRIX='{"include":[{"device":"256M","config":"config/256m.config"},{"device":"512M","config":"config/512m.config"}]}'
+              ;;
+            *)
+              echo "Unsupported device: $DEVICE_INPUT" >&2
+              exit 1
+              ;;
+          esac
+
+          case "$UPLOAD_RELEASE" in
+            true|false) ;;
+            *) echo "Invalid release flag: $UPLOAD_RELEASE" >&2; exit 1 ;;
+          esac
+
+          case "$PRERELEASE" in
+            true|false) ;;
+            *) echo "Invalid prerelease flag: $PRERELEASE" >&2; exit 1 ;;
+          esac
+
+          SOURCE_COMMIT="$REPO_COMMIT"
+          if [ -z "$SOURCE_COMMIT" ]; then
+            SOURCE_COMMIT="$(git ls-remote "$REPO_URL" "refs/heads/$REPO_BRANCH" | cut -f1)"
+          fi
+
+          if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Unable to resolve a full source commit for $REPO_URL ($REPO_BRANCH)" >&2
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "device=$DEVICE_INPUT" >> "$GITHUB_OUTPUT"
+          echo "release=$UPLOAD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+
   menuconfig:
     name: ⚙️ Menuconfig & Push
-    if: github.event.inputs.ssh == 'true' && github.event.inputs.device != 'all'
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.ssh == 'true' && github.event.inputs.device != 'all'
     runs-on: ubuntu-22.04
+    outputs:
+      config_commit: ${{ steps.push.outputs.config_commit }}
+    env:
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
     steps:
       - name: 🙌 Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 🛠️ Init Environment
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libncurses-dev build-essential git wget python3 bzip2
           sudo mkdir -p /workdir
-          sudo chown $USER:$GROUPS /workdir
+          sudo chown "$USER:$(id -gn)" /workdir
 
-      - name: 🪜 Clone source code
+      - name: 🪜 Clone Source Code
         working-directory: /workdir
         run: |
-          git clone $REPO_URL -b $REPO_BRANCH --single-branch --filter=blob:none openwrt
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+          git clone "$REPO_URL" -b "$REPO_BRANCH" --single-branch --filter=blob:none openwrt
+          cd openwrt
+          git checkout --detach "$SOURCE_COMMIT"
+          ln -sfn /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
 
-      - name: 🔧 Set device variables
+      - name: 🔧 Set Device Variables
         run: |
           case "$DEVICE_INPUT" in
-            "256M") echo "CONFIG_FILE=config/256m.config" >> $GITHUB_ENV ;;
-            "128M") echo "CONFIG_FILE=config/128m.config" >> $GITHUB_ENV ;;
-            "128M-Ubootmod") echo "CONFIG_FILE=config/128muboot.config" >> $GITHUB_ENV ;;
-            "512M") echo "CONFIG_FILE=config/512m.config" >> $GITHUB_ENV ;;
+            256M) echo "CONFIG_FILE=config/256m.config" >> "$GITHUB_ENV" ;;
+            512M) echo "CONFIG_FILE=config/512m.config" >> "$GITHUB_ENV" ;;
+            *) echo "Unsupported device: $DEVICE_INPUT" >&2; exit 1 ;;
           esac
 
-      - name: 👩‍💻 Copy previous config if exists
+      - name: 🧬 Update & Install Feeds
+        working-directory: /workdir/openwrt
         run: |
-          if [ -f "$GITHUB_WORKSPACE/${CONFIG_FILE}" ]; then
-            cp -f "$GITHUB_WORKSPACE/${CONFIG_FILE}" /workdir/openwrt/.config
+          if [ -f "$GITHUB_WORKSPACE/$FEEDS_CONF" ]; then
+            cp -f "$GITHUB_WORKSPACE/$FEEDS_CONF" feeds.conf.default
           fi
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH" "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-      - name: ⚙️ Load custom feeds
+      - name: 🧩 Load Custom Configuration
+        working-directory: /workdir/openwrt
         run: |
-          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-          chmod +x $DIY_P1_SH
-          cd openwrt
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          test -f "$GITHUB_WORKSPACE/$CONFIG_FILE"
+          cp -f "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+          BUILD_DEVICE="$DEVICE_INPUT" "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
-      - name: 🧬 Update & Install feeds
-        run: cd openwrt && ./scripts/feeds update -a && ./scripts/feeds install -a
-
-      - name: 🧩 Load custom configuration
-        run: |
-          [ -e $CONFIG_FILE ] && cp -f $CONFIG_FILE openwrt/.config
-          chmod +x $DIY_P2_SH
-          cd openwrt
-          BUILD_DEVICE="$DEVICE_INPUT" $GITHUB_WORKSPACE/$DIY_P2_SH
-
-      - name: ⌨️ SSH connection to Menuconfig
+      - name: ⌨️ SSH Connection to Menuconfig
         uses: mxschmitt/action-tmate@v3
         timeout-minutes: 15
-          
-      - name: 📤 Push config to main branch
+
+      - name: 📤 Push Config to Current Branch
+        id: push
         run: |
+          set -euo pipefail
           SRC="/workdir/openwrt/.config"
-          DST="$GITHUB_WORKSPACE/${CONFIG_FILE}"
-          mkdir -p "$(dirname "$DST")"
+          DST="$GITHUB_WORKSPACE/$CONFIG_FILE"
           cp -f "$SRC" "$DST"
+
           cd "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$CONFIG_FILE"
-          
-          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          
-          git diff --cached --quiet || (
-            git commit -m "Update config: ${CONFIG_FILE}" || true
-            git pull --rebase origin $CURRENT_BRANCH
-            git push -f origin HEAD:$CURRENT_BRANCH
-          )
+
+          if git diff --cached --quiet; then
+            echo "Configuration is unchanged"
+            echo "config_commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "chore(config): update $DEVICE_INPUT build configuration"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          echo "config_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
-    name: 🔨 Build Firmware
-    needs: menuconfig
-    if: always() && (needs.menuconfig.result == 'success' || needs.menuconfig.result == 'skipped')
+    name: 🔨 Build ${{ matrix.device }} Firmware
+    needs: [prepare, menuconfig]
+    if: ${{ always() && needs.prepare.result == 'success' && (needs.menuconfig.result == 'success' || needs.menuconfig.result == 'skipped') }}
     runs-on: ubuntu-22.04
-    
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      BUILD_DEVICE: ${{ matrix.device }}
+      CONFIG_FILE: ${{ matrix.config }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
     steps:
       - name: 🙌 Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.menuconfig.outputs.config_commit || github.sha }}
 
       - name: 🪠 Free Disk Space
         uses: jlumbroso/free-disk-space@main
@@ -163,141 +242,153 @@ jobs:
           sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
           sudo timedatectl set-timezone "$TZ"
           sudo mkdir -p /workdir
-          sudo chown $USER:$GROUPS /workdir
+          sudo chown "$USER:$(id -gn)" /workdir
 
-      - name: 🪜 Clone source code
+      - name: 🪜 Clone Source Code
         working-directory: /workdir
         run: |
-          git clone $REPO_URL -b $REPO_BRANCH --single-branch --filter=blob:none openwrt
-          if [ -n "${REPO_COMMIT}" ]; then
-            cd openwrt && git checkout ${REPO_COMMIT}
-          fi
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+          git clone "$REPO_URL" -b "$REPO_BRANCH" --single-branch --filter=blob:none openwrt
+          cd openwrt
+          git checkout --detach "$SOURCE_COMMIT"
+          ln -sfn /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
 
-      - name: ⚙️ Setup ccache & DL cache
+      - name: ⚙️ Setup Ccache & Download Cache
         uses: actions/cache@v4
         with:
           path: |
             /workdir/.ccache
             /workdir/openwrt/dl
-          key: ${{ runner.os }}-openwrt-combined-${{ env.REPO_BRANCH }}-${{ hashFiles('config/*.config') }}
+          key: ${{ runner.os }}-openwrt-${{ matrix.device }}-${{ env.REPO_BRANCH }}-${{ hashFiles(matrix.config) }}
           restore-keys: |
-            ${{ runner.os }}-openwrt-combined-${{ env.REPO_BRANCH }}-
+            ${{ runner.os }}-openwrt-${{ matrix.device }}-${{ env.REPO_BRANCH }}-
 
-      - name: 🔧 Configure ccache
+      - name: 🔧 Configure Ccache
         run: |
-          ccache --set-config=max_size=$CCACHE_MAXSIZE
-          ccache --set-config=cache_dir=$CCACHE_DIR
+          ccache --set-config=max_size="$CCACHE_MAXSIZE"
+          ccache --set-config=cache_dir="$CCACHE_DIR"
           ccache --set-config=compression=true
           ccache -z
 
-      - name: 🧬 Update & Install feeds
+      - name: 🧬 Update & Install Feeds
+        working-directory: /workdir/openwrt
         run: |
-          cd openwrt
-          [ -e $GITHUB_WORKSPACE/$FEEDS_CONF ] && mv $GITHUB_WORKSPACE/$FEEDS_CONF feeds.conf.default
-          chmod +x $GITHUB_WORKSPACE/$DIY_P1_SH
-          $GITHUB_WORKSPACE/$DIY_P1_SH
+          if [ -f "$GITHUB_WORKSPACE/$FEEDS_CONF" ]; then
+            cp -f "$GITHUB_WORKSPACE/$FEEDS_CONF" feeds.conf.default
+          fi
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH" "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          chmod +x $GITHUB_WORKSPACE/$DIY_P2_SH
 
-      - name: 🔨 Multi-Device Compilation Loop
-        id: compile
+      - name: 🧩 Load ${{ matrix.device }} Configuration
+        working-directory: /workdir/openwrt
         run: |
-          # 1. 确定编译列表
-          if [ "${DEVICE_INPUT}" = "all" ]; then
-            DEVICES="256M 128M 128M-Ubootmod 512M"
-          else
-            DEVICES="${DEVICE_INPUT}"
+          CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "Missing build config: $CONFIG_PATH" >&2
+            exit 1
+          fi
+          cp -f "$CONFIG_PATH" .config
+          BUILD_DEVICE="$BUILD_DEVICE" "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          make defconfig
+
+      - name: 📥 Download Sources
+        working-directory: /workdir/openwrt
+        run: make download -j"$(nproc)"
+
+      - name: 🏗️ Compile Firmware
+        working-directory: /workdir/openwrt
+        run: |
+          if ! make -j"$(nproc)" CC="ccache gcc" CXX="ccache g++"; then
+            echo "⚠️ Multi-threaded build failed, retrying single-threaded..."
+            make -j1 V=s
+          fi
+          ccache -s
+
+      - name: 📦 Collect Firmware
+        working-directory: /workdir/openwrt
+        run: |
+          OUTPUT_DIR="$GITHUB_WORKSPACE/firmware_collection"
+          mkdir -p "$OUTPUT_DIR"
+          find bin/targets -type f -name '*sysupgrade.bin' -exec cp -f {} "$OUTPUT_DIR/" \;
+          if ! find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*sysupgrade.bin' -print -quit | grep -q .; then
+            echo "No sysupgrade firmware was produced for $BUILD_DEVICE" >&2
+            exit 1
           fi
 
-          mkdir -p $GITHUB_WORKSPACE/firmware_collection
-
-          cd /workdir/openwrt
-
-          for DEV in $DEVICES; do
-            echo "::group::🚀 Building $DEV"
-            
-            # 2. 设置当前设备配置文件
-            case "$DEV" in
-              "256M") CONFIG="config/256m.config" ;;
-              "128M") CONFIG="config/128m.config" ;;
-              "128M-Ubootmod") CONFIG="config/128muboot.config" ;;
-              "512M") CONFIG="config/512m.config" ;;
-            esac
-            
-            echo "Using Config: $CONFIG"
-            
-            # 3. 加载配置
-            cp -f $GITHUB_WORKSPACE/$CONFIG .config
-            BUILD_DEVICE="$DEV" $GITHUB_WORKSPACE/$DIY_P2_SH
-            
-            # 4. 刷新配置并下载
-            make defconfig
-            make download -j$(nproc)
-            
-            # 5. 开始编译
-            # 使用 ccache 加速，并保留 Toolchain
-            if ! make -j$(nproc) CC="ccache gcc" CXX="ccache g++"; then
-              echo "⚠️ Multi-threaded failed, retrying single-threaded..."
-              make -j1 V=s || exit 1
-            fi
-
-            echo "✅ $DEV build finished."
-            df -hT /workdir
-            echo "::endgroup::"
-          done
-
-          echo "📥 Collecting artifacts"
-          find bin/targets/ -name "*sysupgrade.bin" -exec cp {} $GITHUB_WORKSPACE/firmware_collection/ \;
-
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: 🪄 Upload Binaries (Artifacts)
+      - name: 🪄 Upload ${{ matrix.device }} Artifact
         uses: actions/upload-artifact@v4
-        if: steps.compile.outputs.status == 'success'
         with:
-          name: ImmortalWrt_Combined_${{ env.DEVICE_INPUT }}_${{ env.REPO_BRANCH }}
+          name: ImmortalWrt_${{ matrix.device }}_${{ env.REPO_BRANCH }}
           path: ${{ github.workspace }}/firmware_collection/*
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: 📌 Generate Release Tag
+  release:
+    name: 📤 Publish Release
+    needs: [prepare, build]
+    if: ${{ needs.build.result == 'success' && needs.prepare.outputs.release == 'true' }}
+    runs-on: ubuntu-22.04
+    env:
+      BUILD_SELECTION: ${{ needs.prepare.outputs.device }}
+      SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+    steps:
+      - name: 📥 Download Firmware Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ImmortalWrt_*
+          path: firmware_collection
+          merge-multiple: true
+
+      - name: 📌 Generate Release Metadata
         id: tag
-        if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
         run: |
-          BUILD_TIME=$(date +"%Y%m%d-%H%M")
-          RELEASE_TAG="ImmortalWrt-${BUILD_TIME}"
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          if ! find firmware_collection -maxdepth 1 -type f -name '*sysupgrade.bin' -print -quit | grep -q .; then
+            echo "No firmware artifacts available for release" >&2
+            exit 1
+          fi
 
-          cat > release.txt << EOF
-          ## 📦 ImmortalWrt Firmware Release
+          BUILD_TIME="$(date +'%Y%m%d-%H%M%S')"
+          RELEASE_TAG="ImmortalWrt-${BUILD_TIME}-${GITHUB_RUN_NUMBER}"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-          **🏷️ Release:** $RELEASE_TAG
+          cat > release.txt <<EOF_RELEASE
+          ## 📦 OneCat定制版本固件发布
+
+          **🏷️ Release:** OneCat定制版本 ($RELEASE_TAG)
           **🌿 Branch:** $REPO_BRANCH
-          **📱 Device:** ${DEVICE_INPUT}
+          **🔖 Source Commit:** $SOURCE_COMMIT
+          **📱 Device:** $BUILD_SELECTION
           **📅 Build Date:** $(date +"%Y-%m-%d %H:%M:%S")
           **🔨 Compiler:** GCC with ccache
+          **📡 Wireless:** 包含 2026-07-08 上游 MTK 扫描竞态、等待时间与丢包修复
 
           ## 📥 Download
 
-          Download the firmware files from the assets below.
+          请从下方 Assets 下载与设备容量一致的固件。
 
           ---
 
-          Built with ❤️ using [GitHub Actions](https://github.com/features/actions)
-          EOF
+          Built with GitHub Actions
+          EOF_RELEASE
 
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: 📤 Upload to Release
+      - name: 🚀 Upload to Release
         uses: softprops/action-gh-release@v2
-        if: steps.tag.outputs.status == 'success'
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: OneCat定制版本 ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
-          prerelease: ${{ env.PRERELEASE == 'true' }}
-          files: ${{ github.workspace }}/firmware_collection/*
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          files: firmware_collection/*
 
-      - name: 🚧 Delete old workflow runs
+  cleanup:
+    name: 🧹 Retain Recent Workflow Runs
+    needs: [prepare, build, release]
+    if: ${{ always() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 🚧 Delete Old Workflow Runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 0

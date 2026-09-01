@@ -19,6 +19,14 @@
 # Modify hostname
 #sed -i 's/OpenWrt/P3TERX-Router/g' package/base-files/files/bin/config_generate
 
+# 确保编译时使用包含 2026-07-08 MTK 扫描修复的源码。
+# 修复包括 PartialScan 状态竞态、后台扫描丢包和 5 秒固定等待缩短为 3 秒。
+REQUIRED_WIFI_SCAN_FIX="6de7ebc60200ddc1ba50596a50f9f4d0cac06ef9"
+if ! git merge-base --is-ancestor "$REQUIRED_WIFI_SCAN_FIX" HEAD 2>/dev/null; then
+  echo "ERROR: source tree is missing required MTK Wi-Fi scan fix $REQUIRED_WIFI_SCAN_FIX" >&2
+  exit 1
+fi
+
 # 临时解决Rust问题
 sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile
 
@@ -30,134 +38,68 @@ sed -i -e '/^IMG_PREFIX:=/i BUILD_DATE := $(shell date +%Y%m%d)' \
 # sed -i 's/reg = <0x5c0000 0x7000000>;/reg = <0x5c0000 0x7a40000>;/' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts
 
 # ===============================
-# Minimal additions: CudyX / xiaomaozai / 512M DTS only
+# OneCat custom defaults and 512M DTS injection.
 # Do not remove original packages or change non-512M device logic.
 # ===============================
 BUILD_DEVICE="${BUILD_DEVICE:-}"
 
-# Set hostname only. Do not change LAN IP or switch/network settings.
+# Keep the device model and distribution identifiers intact; only set the custom brand fields.
 mkdir -p files/etc/uci-defaults
-cat > files/etc/uci-defaults/90-cudyx-defaults <<'EOF_CUDYX'
+cat > files/etc/uci-defaults/90-onecat-defaults <<'EOF_ONECAT'
 #!/bin/sh
-uci set system.@system[0].hostname='CudyX'
+uci set system.@system[0].hostname='OneCat'
+uci set system.@system[0].description='OneCat定制版本'
 uci commit system
 exit 0
-EOF_CUDYX
-chmod +x files/etc/uci-defaults/90-cudyx-defaults
+EOF_ONECAT
+chmod +x files/etc/uci-defaults/90-onecat-defaults
 
-# XiaoMaoZai LuCI badge.
+# Add one explicit LuCI badge without rewriting page text or third-party copyright notices.
 mkdir -p files/www/luci-static/custom files/etc/uci-defaults
-cat > files/www/luci-static/custom/xiaomaozai-badge.js <<'EOF_BADGE_JS'
-(function () {
-  function isFooterNode(node) {
-    var el = node.parentElement;
-    while (el) {
-      var id = (el.id || '').toLowerCase();
-      var cls = (el.className || '').toString().toLowerCase();
-      if (el.tagName === 'FOOTER' || id.indexOf('footer') >= 0 || cls.indexOf('footer') >= 0) return true;
-      el = el.parentElement;
-    }
-    return false;
-  }
-
-  function walkTextNodes(root, callback) {
-    var walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_TEXT, {
-      acceptNode: function (node) {
-        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-        var p = node.parentElement;
-        if (!p) return NodeFilter.FILTER_REJECT;
-        var tag = p.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEXTAREA' || tag === 'INPUT') return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
-    var nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    nodes.forEach(callback);
-  }
-
-  function patchLuCIText() {
-    walkTextNodes(document.body, function (node) {
-      var text = node.nodeValue;
-
-      // Footer: only replace the leading brand text, keep LuCI version and ImmortalWrt version after it unchanged.
-      if (text.indexOf('Powered by LuCI') >= 0) {
-        node.nodeValue = text.replace('Powered by LuCI', 'Power By 小喵崽');
-        return;
-      }
-
-      // Overview card firmware line: replace the long ImmortalWrt version line only outside footer.
-      // Do not touch the footer version string after the slash.
-      if (!isFooterNode(node) && text.indexOf('ImmortalWrt') >= 0 && text.indexOf('Powered by') < 0) {
-        node.nodeValue = '小喵崽 X VoHive';
-      }
-    });
-  }
-
-  function addBadge() {
-    if (!document.getElementById('xiaomaozai-badge')) {
-      var a = document.createElement('a');
-      a.id = 'xiaomaozai-badge';
-      a.textContent = '小喵崽';
-      a.href = 'https://github.com/asrtroh-netizen/immortalwrt-mt7981-cudy-tr3000';
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.style.cssText = [
-        'position:fixed','right:14px','bottom:14px','z-index:99999',
-        'padding:6px 10px','border-radius:999px','font-size:12px',
-        'line-height:1','text-decoration:none','background:rgba(0,0,0,.62)',
-        'color:#fff','box-shadow:0 2px 10px rgba(0,0,0,.25)',
-        'backdrop-filter:blur(6px)'
-      ].join(';');
-      document.body.appendChild(a);
-    }
-    patchLuCIText();
-    setTimeout(patchLuCIText, 300);
-    setTimeout(patchLuCIText, 1000);
-  }
-
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addBadge);
-  else addBadge();
-})();
-EOF_BADGE_JS'
+cat > files/www/luci-static/custom/onecat-badge.js <<'EOF_BADGE_JS'
 (function () {
   function addBadge() {
-    if (document.getElementById('xiaomaozai-badge')) return;
-    var a = document.createElement('a');
-    a.id = 'xiaomaozai-badge';
-    a.textContent = '小猫崽';
-    a.href = 'https://github.com/asrtroh-netizen/immortalwrt-mt7981-cudy-tr3000';
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    a.style.cssText = [
+    if (document.getElementById('onecat-badge')) return;
+
+    var badge = document.createElement('a');
+    badge.id = 'onecat-badge';
+    badge.textContent = 'OneCat定制版本';
+    badge.href = 'https://github.com/asrtroh-netizen/immortalwrt-mt7981-cudy-tr3000';
+    badge.target = '_blank';
+    badge.rel = 'noopener noreferrer';
+    badge.style.cssText = [
       'position:fixed','right:14px','bottom:14px','z-index:99999',
       'padding:6px 10px','border-radius:999px','font-size:12px',
       'line-height:1','text-decoration:none','background:rgba(0,0,0,.62)',
       'color:#fff','box-shadow:0 2px 10px rgba(0,0,0,.25)',
       'backdrop-filter:blur(6px)'
     ].join(';');
-    document.body.appendChild(a);
+    document.body.appendChild(badge);
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addBadge);
-  else addBadge();
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', addBadge, { once: true });
+  } else {
+    addBadge();
+  }
 })();
 EOF_BADGE_JS
 
-cat > files/etc/uci-defaults/93-xiaomaozai-badge <<'EOF_BADGE_UCI'
+cat > files/etc/uci-defaults/93-onecat-badge <<'EOF_BADGE_UCI'
 #!/bin/sh
 set -e
 for f in /usr/share/ucode/luci/template/themes/*/header.ut /usr/lib/lua/luci/view/themes/*/header.htm; do
   [ -f "$f" ] || continue
-  grep -q 'xiaomaozai-badge.js' "$f" && continue
+  grep -q 'onecat-badge.js' "$f" && continue
   if grep -q '</body>' "$f"; then
-    sed -i 's#</body>#<script src="/luci-static/custom/xiaomaozai-badge.js"></script></body>#' "$f"
+    sed -i 's#</body>#<script src="/luci-static/custom/onecat-badge.js"></script></body>#' "$f"
   else
-    printf '\n<script src="/luci-static/custom/xiaomaozai-badge.js"></script>\n' >> "$f"
+    printf '\n<script src="/luci-static/custom/onecat-badge.js"></script>\n' >> "$f"
   fi
 done
 exit 0
 EOF_BADGE_UCI
-chmod +x files/etc/uci-defaults/93-xiaomaozai-badge
+chmod +x files/etc/uci-defaults/93-onecat-badge
 
 # 512M DTS patch. Only run for BUILD_DEVICE=512M.
 if [ "$BUILD_DEVICE" = "512M" ]; then
