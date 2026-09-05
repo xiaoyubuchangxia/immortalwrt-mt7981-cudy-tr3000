@@ -29,3 +29,7 @@ git clone https://github.com/eamonxg/luci-theme-aurora package/luci-theme-aurora
 git clone https://github.com/eamonxg/luci-app-aurora-config package/luci-app-aurora-config
 git clone https://github.com/timsaya/luci-app-bandix package/luci-app-bandix
 git clone https://github.com/timsaya/openwrt-bandix package/openwrt-bandix
+
+# 添加第三方插件源
+echo 'src-git kenzok8 https://github.com/kenzok8/openwrt-packages' >> feeds.conf.default
+echo 'src-git small https://github.com/kenzok8/small' >> feeds.conf.default
